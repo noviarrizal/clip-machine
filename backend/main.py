@@ -1,60 +1,74 @@
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import uuid
 import os
-import asyncio
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+# Internal Imports
 from processor import download_and_process
 
-process_lock = asyncio.Lock()
+app = FastAPI(title="ClipGen API")
 
-app = FastAPI()
-
-# Enable CORS for FE
-
+# 1. SETUP CORS (Connects to your Next.js Frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # In production, replace with your frontend URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Store job status in memory for MVP
+# 2. SETUP DIRECTORIES & STATIC SERVING
+# This allows you to view videos at http://localhost:8000/output/filename.mp4
+os.makedirs("output", exist_ok=True)
+app.mount("/output", StaticFiles(directory="output"), name="output")
+
+# 3. IN-MEMORY JOB TRACKER (Simplest 'Database' for MVP)
 jobs = {}
 
-def is_key_valid(user_key: str):
-    # For MVP: Just check a local text file
+class ProcessRequest(BaseModel):
+    url: str
+    license_key: str
+
+# 4. HELPER: LICENSE CHECK
+def is_valid_key(key: str) -> bool:
     if not os.path.exists("keys.txt"):
         return False
     with open("keys.txt", "r") as f:
-        valid_keys = f.read().splitlines()
-    return user_key in valid_keys
+        keys = f.read().splitlines()
+    return key in keys
+
+# 5. BACKGROUND TASK WRAPPER
+def run_job(job_id: str, url: str):
+    try:
+        results = download_and_process(url, job_id)
+        jobs[job_id] = {"status": "completed", "clips": results}
+    except Exception as e:
+        print(f"Error processing job {job_id}: {e}")
+        jobs[job_id] = {"status": "failed", "error": str(e)}
+
+# 6. API ROUTES
+
+@app.get("/")
+def health_check():
+    return {"status": "online", "message": "ClipGen Backend Running"}
 
 @app.post("/process")
-async def start_job(data: dict, background_tasks: BackgroundTasks):
-    # Hard constraint: Check key before burning CPU
-    if not is_key_valid(data.get('license_key')):
-        return {"status": "error", "message": "Invalid or expired License Key"}
+async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks):
+    # Validate License
+    if not is_valid_key(request.license_key):
+        raise HTTPException(status_code=401, detail="Invalid License Key")
     
     job_id = str(uuid.uuid4())
-    # The background task will wait for the lock
-    background_tasks.add_task(safe_run_processor, job_id, data['url'])
+    jobs[job_id] = {"status": "processing", "clips": []}
+    
+    # Run the heavy processing in the background so the API stays responsive
+    background_tasks.add_task(run_job, job_id, request.url)
+    
     return {"job_id": job_id}
-
-async def safe_run_processor(job_id, url):
-    async with process_lock: # Only one video at a time!
-        run_processor(job_id, url)
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    return jobs.get(job_id, {"status": "not found"})
-
-def run_processor(job_id: str, url: str):
-    try:
-        output_file = download_and_process(url, job_id)
-        jobs[job_id] = {"status": "completed", "video_url": f"http://localhost:8000/output/{job_id}.mp4"}
-    except Exception as e:
-        jobs[job_id] = {"status": "failed", "error": str(e)}
-
-# Servethe output foldr so FE can play the videos
-app.mount("/output", StaticFiles(directory="output"), name="output")
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return jobs[job_id]
