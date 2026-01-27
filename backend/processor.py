@@ -3,6 +3,21 @@ import subprocess
 import os
 import datetime
 
+VIRAL_KEYWORDS = [
+    "amazing",
+    "best",
+    "beautiful",
+    "awesome",
+    "fantastic",
+    "great",
+    "incredible",
+    "perfect",
+    "stunning",
+    "wonderful"
+    "important", "secret", "hack", "advice", "money", "growth", 
+    "mistake", "never", "always", "story", "the truth", "failed"
+]
+
 def download_and_process(url: str, job_id: str):
     # 1. Download
     input_path = f"downloads/{job_id}_raw.mp4"
@@ -88,3 +103,49 @@ def create_srt(segments, output_path, start_offset, duration):
             f.write(f"{i + 1}\n")
             f.write(f"{format_timestamp(rel_start)} --> {format_timestamp(rel_end)}\n")
             f.write(f"{seg['text'].strip().upper()}\n\n") # Upper case looks better for shorts
+
+def score_segments(segments, window_size=30):
+    scored_amounts = []
+
+    # Slide through segments to find high-density keyword areas
+    for i in range(len(segments)):
+        start_time = segments[i]['start']
+        end_time = start_time + window_size
+
+        # Calculate score for this 30s window
+        score = 0
+        text_content = ""
+        for j in range(i, len(segments)):
+            if segments[j]['start'] > end_time:
+                break
+
+            text = segments[j]['text'].lower()
+            text_content += " " + text
+
+            # Boost score if viral keywords appear
+            for word in VIRAL_KEYWORDS:
+                if word in text:
+                    score += 10
+
+            # Boost score for shorter, punchier sentences
+            if len(segments[j]['text']) < 50:
+                score += 2
+
+        scored_momments.append({
+            "start": start_time,
+            "score": score,
+            "text": text_content
+        })
+
+    # Sort by score and pick the top 5 (filtering out overlapping ones)
+    scored_momments.sort(key=lambda x: x['score'], reverse=True)
+    
+    top_clips = []
+    for momment in scored_momments:
+        if any(abs(momment['start'] - existing['start']) < 60 for existing in top_clips):
+            continue
+        top_clips.append(momment)
+        if len(top_clips) >= 5:
+            break
+
+    return top_clips
