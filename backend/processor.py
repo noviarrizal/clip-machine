@@ -1,6 +1,7 @@
 import whisper
 import subprocess
 import os
+import datetime
 
 def download_and_process(url: str, job_id: str):
     # 1. Download
@@ -46,3 +47,44 @@ def download_and_process(url: str, job_id: str):
         
         return clips_metadata
 
+    # Generate the SRT file for a specific segment
+    srt_path = f"output/{job_id}_temp.srt"
+    create_srt(result['segments'], srt_path, start, 30)
+    
+    # FFmpeg with Subtitles
+    # Alignment 10 = Centered bottom. 
+    # PrimaryColour: &H00FFFFFF is White, &H0000FFFF is Yellow (BGR format)
+    subtitle_style = "Alignment=10,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=140"
+    
+    ffmpeg_cmd = [
+        'ffmpeg', '-y', '-ss', str(start), '-t', '30',
+        '-i', input_path,
+        '-vf', f"crop=ih*(9/16):ih,scale=1080:1920,subtitles={srt_path}:force_style='{subtitle_style}'",
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+        '-c:a', 'aac', output_path
+    ]
+    subprocess.run(ffmpeg_cmd)
+
+def format_timestamp(seconds: float) -> str:
+    td = datetime.timedelta(seconds=seconds)
+    total_seconds = int(td.total_seconds())
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    millis = int(td.microseconds / 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+def create_srt(segments, output_path, start_offset, duration):
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for i, seg in enumerate(segments):
+            # Only include segments within our clip's time range
+            if seg['start'] < start_offset: continue
+            if seg['start'] > start_offset + duration: break
+            
+            # Adjust timestamps relative to the start of the clip
+            rel_start = max(0, seg['start'] - start_offset)
+            rel_end = min(duration, seg['end'] - start_offset)
+            
+            f.write(f"{i + 1}\n")
+            f.write(f"{format_timestamp(rel_start)} --> {format_timestamp(rel_end)}\n")
+            f.write(f"{seg['text'].strip().upper()}\n\n") # Upper case looks better for shorts
