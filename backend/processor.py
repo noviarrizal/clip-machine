@@ -89,23 +89,32 @@ def write_srt_file(segments, path, start_offset):
 # --- STAGE 3: THE MAIN ENGINE ---
 
 def download_and_process(url: str, job_id: str):
-    """Main workflow: Download -> Transcribe -> Analyze -> Export."""
-    
-    # Setup workspace
     os.makedirs("downloads", exist_ok=True)
     os.makedirs("output", exist_ok=True)
+
+    # 1. Download (We use a template so we KNOW the filename, but allow any extension)
+    # This forces yt-dlp to use the job_id as the name but keeps the extension it chooses
+    download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
     
-    raw_video = os.path.abspath(f"downloads/{job_id}.mp4")
-    
-    # 1. Download source
+    print(f"--- Downloading: {url} ---")
     subprocess.run([
         'yt-dlp', '-f', 'bestvideo[height<=720]+bestaudio/best',
-        '-o', raw_video, url
+        '-o', download_template, url
     ], check=True)
+
+    # FIND the actual file (since it could be .mp4, .mkv, or .webm)
+    downloaded_files = [f for f in os.listdir("downloads") if f.startswith(job_id)]
+    if not downloaded_files:
+        raise Exception("Download failed, no file found.")
     
+    raw_video_path = os.path.abspath(os.path.join("downloads", downloaded_files[0]))
+    print(f"✅ Downloaded to: {raw_video_path}")
+
     # 2. Transcribe
+    print("--- Transcribing with Whisper ---")
     model = whisper.load_model("base")
-    result = model.transcribe(raw_video)
+    # We use fp16=False because your log said you are on CPU
+    result = model.transcribe(raw_video_path, fp16=False)
     
     # 3. Analyze for best moments
     moments = find_best_moments(result['segments'])
@@ -114,20 +123,19 @@ def download_and_process(url: str, job_id: str):
     
     # 4. Generate clips
     for i, moment in enumerate(moments):
-        clip_name = f"{job_id}_clip_{i}.mp4"
+        clip_name = f"{job_id}_clip_{i}.mp4" # We output as mp4 for web compatibility
         srt_path = os.path.abspath(f"output/{job_id}_{i}.srt")
         output_path = os.path.abspath(f"output/{clip_name}")
         
         write_srt_file(result['segments'], srt_path, moment['start'])
         
-        # Path escaping for FFmpeg 'subtitles' filter
         clean_srt = srt_path.replace("\\", "/").replace(":", "\\:")
         
-        # Build FFmpeg command (Vertical crop + Burn Subtitles)
+        print(f"--- Rendering Clip {i} ---")
         cmd = [
             'ffmpeg', '-y', 
             '-ss', str(moment['start']), '-t', str(CLIP_DURATION),
-            '-i', raw_video,
+            '-i', raw_video_path, # Using the dynamic path
             '-vf', f"crop=ih*(9/16):ih,scale=1080:1920,subtitles='{clean_srt}':force_style='Alignment=10,FontSize=22'",
             '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', output_path
         ]
