@@ -3,6 +3,10 @@ import datetime
 import subprocess
 import whisper
 
+# Explicitly add FFmpeg to the PATH for this Python process
+ffmpeg_path = r"C:\ffmpeg\bin" # Ensure this matches your actual path
+os.environ["PATH"] += os.pathsep + ffmpeg_path
+
 # --- CONFIGURATION ---
 VIRAL_KEYWORDS = [
     "amazing", "best", "hack", "advice", "money", "growth", 
