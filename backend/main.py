@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 # Internal Imports
 from processor import download_and_process
+from supabase_client import supabase
 
 app = FastAPI(title="ClipGen API")
 

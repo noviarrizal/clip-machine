@@ -16,7 +16,7 @@ source venv/bin/activate
 
 # 4. Install Dependencies
 pip install --upgrade pip
-pip install fastapi uvicorn yt-dlp openai-whisper python-multipart
+pip install -r backend/requirements.txt
 
 echo "---"
 echo "✅ Setup Complete!"
