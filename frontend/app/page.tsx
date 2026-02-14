@@ -1,7 +1,30 @@
+'use client';
+
+import { useState } from 'react';
 import { Hero } from "@/components/Hero";
 import { UploadZone } from "@/components/UploadZone";
+import { ContentStudio } from '@/components/ContentStudio';
+
+// Define the structure of a Clip from the backend
+interface BackendClip {
+  id: number;
+  url: string;
+  timestamp: string;
+}
+
+// Define the structure for a Job
+export interface Job {
+  job_id: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  clips?: BackendClip[];
+  transcription?: any[];
+  error?: string;
+}
 
 export default function Home() {
+  const [job, setJob] = useState<Job | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
   return (
     <main className="min-h-screen bg-[#0a0a0a] selection:bg-purple-500/30">
       {/* Navigation */}
@@ -24,7 +47,25 @@ export default function Home() {
       </nav>
 
       <Hero />
-      <UploadZone />
+      
+      <div className="container mx-auto px-6 mt-12 mb-24">
+        {job && job.status === 'completed' ? (
+        <ContentStudio jobId={job.job_id} clips={job.clips ? job.clips.map(clip => ({ 
+            id: clip.id,
+            filename: clip.url.split('/').pop() || '',
+            url: clip.url,
+            score: 0,
+            transcription: job.transcription || [] 
+        })) : []} />
+        ) : (
+            <UploadZone 
+                setJob={setJob} 
+                setIsLoading={setIsLoading} 
+                isLoading={isLoading} 
+                job={job}
+            />
+        )}
+      </div>
 
       {/* Footer */}
       <footer className="border-t border-white/5 py-12">

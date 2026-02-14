@@ -8,6 +8,9 @@ from pydantic import BaseModel
 # Internal Imports
 from processor import download_and_process
 from supabase_client import supabase
+from groq import Groq
+
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 app = FastAPI(title="ClipGen API")
 
@@ -24,8 +27,9 @@ app.add_middleware(
 os.makedirs("output", exist_ok=True)
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
-# 3. IN-MEMORY JOB TRACKER (Simplest 'Database' for MVP)
-jobs = {}
+# 3. DATABASE-BACKED JOB TRACKER
+# We use Supabase to persist job status, so restarts don't lose data.
+# The old in-memory 'jobs' dictionary is removed.
 
 class ProcessRequest(BaseModel):
     url: str
@@ -33,20 +37,38 @@ class ProcessRequest(BaseModel):
 
 # 4. HELPER: LICENSE CHECK
 def is_valid_key(key: str) -> bool:
-    if not os.path.exists("keys.txt"):
+    """Checks if a license key is valid by querying the Supabase 'keys' table."""
+    try:
+        result = supabase.table("keys").select("key").eq("key", key).execute()
+        return len(result.data) > 0
+    except Exception as e:
+        print(f"Error validating key: {e}")
         return False
-    with open("keys.txt", "r") as f:
-        keys = f.read().splitlines()
-    return key in keys
 
 # 5. BACKGROUND TASK WRAPPER
 def run_job(job_id: str, url: str):
+    """The background task that downloads, processes, and updates the job status in Supabase."""
     try:
+        # Update status to 'processing'
+        supabase.table("jobs").update({"status": "processing"}).eq("job_id", job_id).execute()
+        
+        # Run the core logic
         results = download_and_process(url, job_id)
-        jobs[job_id] = {"status": "completed", "clips": results}
+        
+        # On success, update with 'completed' and the final clips
+        supabase.table("jobs").update({
+            "status": "completed",
+            "clips": results['clips'],
+            "transcription": results['transcription']
+        }).eq("job_id", job_id).execute()
+
     except Exception as e:
         print(f"Error processing job {job_id}: {e}")
-        jobs[job_id] = {"status": "failed", "error": str(e)}
+        # On failure, update with 'failed' and the error message
+        supabase.table("jobs").update({
+            "status": "failed",
+            "error": str(e)
+        }).eq("job_id", job_id).execute()
 
 # 6. API ROUTES
 
@@ -56,20 +78,84 @@ def health_check():
 
 @app.post("/process")
 async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks):
-    # Validate License
     if not is_valid_key(request.license_key):
         raise HTTPException(status_code=401, detail="Invalid License Key")
-    
+
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {"status": "processing", "clips": []}
-    
-    # Run the heavy processing in the background so the API stays responsive
+
+    # Insert a new job record into Supabase
+    try:
+        supabase.table("jobs").insert({
+            "job_id": job_id,
+            "status": "pending",
+            "url": request.url
+        }).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {e}")
+
     background_tasks.add_task(run_job, job_id, request.url)
-    
     return {"job_id": job_id}
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    if job_id not in jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return jobs[job_id]
+    """Retrieves the status of a job from the Supabase 'jobs' table."""
+    try:
+        result = supabase.table("jobs").select("*").eq("job_id", job_id).single().execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return result.data
+    except Exception as e:
+        # Handle cases where .single() finds no record
+        if "PGRST116" in str(e): # PostgREST code for "exact one row not found"
+             raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=500, detail=f"Error fetching job status: {e}")
+
+# 7. NEW: Social Content Generation
+class ContentRequest(BaseModel):
+    job_id: str
+
+def generate_social_post(transcription: str) -> str:
+    """Generates a social media post using Groq based on a transcription."""
+    if not transcription:
+        return ""
+
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a viral social media content expert. Your goal is to create a short, punchy, and engaging social media post based on the provided transcription. Use emojis, hashtags, and a conversational tone. The output should be a single block of text, ready to be copy-pasted."
+                },
+                {
+                    "role": "user",
+                    "content": f"Here is the transcription of a video clip: {transcription}"
+                }
+            ],
+            model="llama3-8b-8192",
+        )
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        print(f"Error generating social post: {e}")
+        return ""
+
+@app.post("/generate-content")
+async def generate_content(request: ContentRequest):
+    """Generates a social media post from a job's transcription."""
+    try:
+        # 1. Fetch the job's transcription from Supabase
+        result = supabase.table("jobs").select("transcription").eq("job_id", request.job_id).single().execute()
+        if not result.data or not result.data.get("transcription"):
+            raise HTTPException(status_code=404, detail="Transcription not found for this job.")
+
+        # The transcription is a list of segment objects, so we join the text
+        full_transcription = " ".join([seg['text'] for seg in result.data["transcription"]])
+
+        # 2. Generate the social post
+        social_post = generate_social_post(full_transcription)
+        if not social_post:
+            raise HTTPException(status_code=500, detail="Failed to generate social content.")
+
+        return {"social_post": social_post}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {e}")

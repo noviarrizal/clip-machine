@@ -1,14 +1,25 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, FileVideo, X, CheckCircle2, Loader2 } from 'lucide-react';
+import { Upload, Loader2, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Job } from '@/app/page'; // Import the Job interface
 
-export function UploadZone() {
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const LICENSE_KEY = process.env.NEXT_PUBLIC_LICENSE_KEY || '';
+
+interface UploadZoneProps {
+  setJob: React.Dispatch<React.SetStateAction<Job | null>>;
+  setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
+  isLoading: boolean;
+  job: Job | null;
+}
+
+export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<'idle' | 'uploading' | 'success'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [inputUrl, setInputUrl] = useState('');
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -20,31 +31,74 @@ export function UploadZone() {
     setIsDragging(false);
   }, []);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
+  const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type.startsWith('video/')) {
-      handleFile(droppedFile);
+    const url = e.dataTransfer.getData('text/uri-list');
+    if (url) {
+      await handleUrl(url);
     }
   }, []);
 
-  const handleFile = (file: File) => {
-    setFile(file);
-    setStatus('uploading');
-    // Simulate upload/processing for UI demo
-    setTimeout(() => {
-      setStatus('success');
-    }, 2000);
+  const handleUrl = async (url: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_URL}/process`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, license_key: LICENSE_KEY || 'DEV-1234' }),
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'Failed to start job');
+      }
+      const newJob = await response.json();
+      setJob(newJob);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const removeFile = () => {
-    setFile(null);
-    setStatus('idle');
-  };
+  useEffect(() => {
+    if (job && (job.status === 'processing' || job.status === 'pending')) {
+      const interval = setInterval(async () => {
+        try {
+          const response = await fetch(`${API_URL}/status/${job.job_id}`);
+          const updatedJob = await response.json();
+          setJob(updatedJob);
+          if (updatedJob.status === 'completed' || updatedJob.status === 'failed') {
+            clearInterval(interval);
+            setIsLoading(false);
+          }
+        } catch (err) {
+          console.error('Failed to fetch job status:', err);
+          setError('Failed to get job status.');
+          clearInterval(interval);
+          setIsLoading(false);
+        }
+      }, 3000); // Poll every 3 seconds
+
+      return () => clearInterval(interval);
+    }
+  }, [job, setJob, setIsLoading]);
 
   return (
     <div className="max-w-3xl mx-auto px-6 pb-20">
+      <div className="mb-4 flex gap-2">
+        <input
+          value={inputUrl}
+          onChange={(e) => setInputUrl(e.target.value)}
+          placeholder="Paste a YouTube/TikTok/X link"
+          className="flex-1 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-sm text-white outline-none focus:border-purple-500"
+        />
+        <button
+          onClick={() => inputUrl && handleUrl(inputUrl)}
+          className="px-4 py-2 rounded-xl bg-purple-600 text-white hover:bg-purple-700"
+        >Process</button>
+      </div>
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -59,16 +113,8 @@ export function UploadZone() {
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        <input
-          type="file"
-          accept="video/*"
-          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-          onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-          disabled={status !== 'idle'}
-        />
-
         <AnimatePresence mode="wait">
-          {status === 'idle' && (
+          {!job && !isLoading && !error && (
             <motion.div
               key="idle"
               initial={{ opacity: 0 }}
@@ -79,15 +125,12 @@ export function UploadZone() {
               <div className="w-16 h-16 bg-purple-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-300">
                 <Upload className="w-8 h-8 text-purple-500" />
               </div>
-              <h3 className="text-xl font-semibold text-white">Drop your video here</h3>
-              <p className="text-zinc-400">MP4, MOV or WebM up to 100MB</p>
-              <button className="mt-4 px-6 py-2 bg-white text-black rounded-full font-medium hover:bg-zinc-200 transition-colors">
-                Select File
-              </button>
+              <h3 className="text-xl font-semibold text-white">Drop a YouTube, TikTok, or X link</h3>
+              <p className="text-zinc-400">We'll download and process it for you.</p>
             </motion.div>
           )}
 
-          {status === 'uploading' && (
+          {(isLoading || (job && (job.status === 'pending' || job.status === 'processing'))) && (
             <motion.div
               key="uploading"
               initial={{ opacity: 0 }}
@@ -97,11 +140,11 @@ export function UploadZone() {
             >
               <Loader2 className="w-12 h-12 text-purple-500 animate-spin mx-auto mb-4" />
               <h3 className="text-xl font-semibold text-white">Processing Video...</h3>
-              <p className="text-zinc-400">{file?.name}</p>
+              <p className="text-zinc-400">This can take a few minutes depending on the length.</p>
             </motion.div>
           )}
 
-          {status === 'success' && (
+          {job && job.status === 'failed' && (
             <motion.div
               key="success"
               initial={{ opacity: 0 }}
@@ -109,22 +152,16 @@ export function UploadZone() {
               exit={{ opacity: 0 }}
               className="space-y-4"
             >
-              <div className="w-16 h-16 bg-green-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                <CheckCircle2 className="w-8 h-8 text-green-500" />
+              <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <AlertTriangle className="w-8 h-8 text-red-500" />
               </div>
-              <h3 className="text-xl font-semibold text-white">Ready to Flow!</h3>
-              <div className="flex items-center justify-center gap-3 bg-white/5 p-3 rounded-xl max-w-xs mx-auto">
-                <FileVideo className="w-5 h-5 text-purple-400" />
-                <span className="text-sm text-zinc-300 truncate">{file?.name}</span>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); removeFile(); }}
-                  className="p-1 hover:bg-white/10 rounded-md transition-colors"
-                >
-                  <X className="w-4 h-4 text-zinc-500" />
-                </button>
-              </div>
-              <button className="mt-6 px-8 py-3 bg-purple-600 text-white rounded-full font-semibold hover:bg-purple-50 px-8 py-3 bg-purple-600 text-white rounded-full font-semibold hover:bg-purple-700 transition-all shadow-[0_0_20px_rgba(147,51,234,0.3)]">
-                Start Transcribing
+              <h3 className="text-xl font-semibold text-white">Processing Failed</h3>
+              <p className="text-zinc-400 max-w-sm mx-auto">{job.error || 'An unknown error occurred.'}</p>
+              <button 
+                onClick={() => setJob(null)} 
+                className="mt-4 px-6 py-2 bg-white text-black rounded-full font-medium hover:bg-zinc-200 transition-colors"
+              >
+                Try Again
               </button>
             </motion.div>
           )}

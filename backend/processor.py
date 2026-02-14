@@ -3,10 +3,18 @@ import datetime
 import subprocess
 import whisper
 import cv2
+from groq import Groq
+from dotenv import load_dotenv
 
-# Explicitly add FFmpeg to the PATH for this Python process
-ffmpeg_path = r"C:\ffmpeg\bin" # Ensure this matches your actual path
-os.environ["PATH"] += os.pathsep + ffmpeg_path
+load_dotenv()
+
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+from tqdm import tqdm
+
+# Ensure FFmpeg is in the system's PATH or specify the path directly
+# You can add the following lines if ffmpeg is not in your PATH
+# ffmpeg_path = r"C:\path\to\ffmpeg\bin"
+# os.environ["PATH"] += os.pathsep + ffmpeg_path
 
 # --- CONFIGURATION ---
 VIRAL_KEYWORDS = [
@@ -93,8 +101,6 @@ def download_and_process(url: str, job_id: str):
     os.makedirs("downloads", exist_ok=True)
     os.makedirs("output", exist_ok=True)
 
-    print(f"✅ Transcription Complete. Found {len(moments)} viral moments.")
-
     # 1. Download (We use a template so we KNOW the filename, but allow any extension)
     # This forces yt-dlp to use the job_id as the name but keeps the extension it chooses
     download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
@@ -113,16 +119,26 @@ def download_and_process(url: str, job_id: str):
     raw_video_path = os.path.abspath(os.path.join("downloads", downloaded_files[0]))
     print(f"✅ Downloaded to: {raw_video_path}")
 
-    # 2. Transcribe
-    print("--- Transcribing with Whisper ---")
-    model = whisper.load_model("base")
-    # We use fp16=False because your log said you are on CPU
-    result = model.transcribe(raw_video_path, fp16=False)
-
-    pbar = tqdm(total=len(moments), desc="🎬 Generating Clips", unit="clip")
+    # 2. Transcribe with Groq
+    print("--- Transcribing with Groq --- ")
+    with open(raw_video_path, "rb") as file:
+        transcription = client.audio.transcriptions.create(
+            file=(raw_video_path, file.read()),
+            model="whisper-large-v3",
+            prompt="", # Optional: Add a prompt to guide the model
+            response_format="verbose_json", # Get segments and timestamps
+            language="en" # Optional: Specify language
+        )
+    result = {
+        'text': transcription.text,
+        'segments': transcription.segments
+    }
     
     # 3. Analyze for best moments
     moments = find_best_moments(result['segments'])
+    print(f"✅ Transcription Complete. Found {len(moments)} viral moments.")
+
+    pbar = tqdm(total=len(moments), desc="🎬 Generating Clips", unit="clip")
     
     final_clips = []
     for i, moment in enumerate(moments):
@@ -162,28 +178,46 @@ def download_and_process(url: str, job_id: str):
     
     pbar.close()
     print("✨ All clips rendered successfully!")
-    return final_clips
+    return {
+        "clips": final_clips,
+        "transcription": result['segments']
+    }
 
 def get_face_center(video_path, start_time):
+    """Finds the horizontal center of the most prominent face in a video frame."""
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        return 0.5 # Default to center
+
     # Jump to 1 second into the clip to find the face
     cap.set(cv2.CAP_PROP_POS_MSEC, (start_time + 1) * 1000)
     success, frame = cap.read()
     cap.release()
 
     if not success:
-        return 0.5  # Default to center if frame read fails
+        print("Error: Could not read frame from video.")
+        return 0.5  # Default to center
 
-    # Load the face detector
+    # Load the pre-trained Haar Cascade model for face detection
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    
+    # Convert the frame to grayscale for the detector
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    
+    # Detect faces
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     if len(faces) > 0:
-        # Get the first face found: (x, y, width, height)
-        (x, y, w, h) = faces[0]
-        face_center_x = x + (w / 2)
-        # Return as a percentage of the total width
+        # Assume the largest face is the main subject
+        main_face = max(faces, key=lambda rect: rect[2] * rect[3])
+        (x, y, w, h) = main_face
+        
+        # Calculate the center of the face
+        face_center_x = x + w / 2
+        
+        # Return the center as a percentage of the total frame width
         return face_center_x / frame.shape[1]
     
-    return 0.5  # Default to center if no face found
+    # If no face is found, default to the center of the frame
+    return 0.5

@@ -29,11 +29,12 @@ export const extractAudio = async (videoFile: File): Promise<Blob> => {
   await ffmpeg.exec(['-i', inputName, '-vn', '-ab', '128k', '-ar', '44100', '-f', 'mp3', outputName]);
 
   const data = await ffmpeg.readFile(outputName);
-  return new Blob([data], { type: 'audio/mp3' });
+  const arrayBuffer = toArrayBuffer(data);
+  return new Blob([arrayBuffer], { type: 'audio/mp3' });
 };
 
 export const renderVideo = async (
-  videoFile: File,
+  videoFile: File | Blob,
   crop: { x: number; y: number; width: number; height: number },
   videoRes: { width: number; height: number },
   displayRes: { width: number; height: number },
@@ -67,22 +68,32 @@ export const renderVideo = async (
   await ffmpeg.writeFile(srtName, srtContent);
 
   // 4. Execute Crop + Burn Subtitles
-  // Note: 'subtitles' filter in ffmpeg.wasm can be tricky with fonts. 
-  // We use a simple crop first. If subtitles filter fails, we fallback to just crop.
+  const vf_ops = [
+    `crop=${actualW}:${actualH}:${actualX}:${actualY}`,
+    `subtitles=${srtName}:force_style='FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,BorderStyle=1,Outline=1,Shadow=0.5'`
+  ];
+
   try {
+    await ffmpeg.exec([
+      '-i', inputName,
+      '-vf', vf_ops.join(','),
+      '-c:a', 'copy',
+      outputName
+    ]);
+  } catch (e) {
+    console.error("FFmpeg execution with subtitles failed, falling back to crop-only", e);
+    // Fallback to crop-only if subtitle burn fails
     await ffmpeg.exec([
       '-i', inputName,
       '-vf', `crop=${actualW}:${actualH}:${actualX}:${actualY}`,
       '-c:a', 'copy',
       outputName
     ]);
-  } catch (e) {
-    console.error("FFmpeg execution failed", e);
-    throw e;
   }
 
   const data = await ffmpeg.readFile(outputName);
-  return new Blob([data], { type: 'video/mp4' });
+  const arrayBuffer = toArrayBuffer(data);
+  return new Blob([arrayBuffer], { type: 'video/mp4' });
 };
 
 function formatSRTTime(seconds: number): string {
@@ -92,4 +103,16 @@ function formatSRTTime(seconds: number): string {
   const ss = date.getUTCSeconds().toString().padStart(2, '0');
   const ms = date.getUTCMilliseconds().toString().padStart(3, '0');
   return `${hh}:${mm}:${ss},${ms}`;
+}
+
+function toArrayBuffer(fileData: unknown): ArrayBuffer {
+  if (typeof fileData === 'string') {
+    return new TextEncoder().encode(fileData).buffer;
+  }
+  if (fileData instanceof Uint8Array) {
+    const copy = new Uint8Array(fileData.byteLength);
+    copy.set(fileData);
+    return copy.buffer;
+  }
+  throw new Error('Unsupported file data type');
 }
