@@ -1,9 +1,11 @@
 import os
 import uuid
+import asyncio
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
 from groq import Groq
 from pydantic import BaseModel
 
@@ -50,14 +52,14 @@ def is_valid_key(key: str) -> bool:
 
 
 # 5. BACKGROUND TASK WRAPPER
-def run_job(job_id: str, url: str):
+def run_job(job_id: str, source: str, is_local: bool = False):
     """The background task that downloads, processes, and updates the job status in Supabase."""
     try:
         # Update status to 'processing'
         supabase.table("jobs").update({"status": "processing"}).eq("job_id", job_id).execute()
 
         # Run the core logic
-        results = download_and_process(url, job_id)
+        results = download_and_process(source, job_id, is_local)
 
         # On success, update with 'completed' and the final clips
         supabase.table("jobs").update(
@@ -99,7 +101,7 @@ async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create job: {e}")
 
-    background_tasks.add_task(run_job, job_id, request.url)
+    background_tasks.add_task(run_job, job_id, request.url, False)
     return {"job_id": job_id}
 
 
@@ -175,3 +177,51 @@ async def generate_content(request: ContentRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {e}")
+@app.post("/upload")
+async def upload_file(background_tasks: BackgroundTasks, license_key: str = Form(...), file: UploadFile = File(...)):
+    if not is_valid_key(license_key):
+        raise HTTPException(status_code=401, detail="Invalid License Key")
+
+    job_id = str(uuid.uuid4())
+
+    try:
+        ext = os.path.splitext(file.filename)[1] or ".mp4"
+        os.makedirs("downloads", exist_ok=True)
+        save_path = os.path.abspath(os.path.join("downloads", f"{job_id}{ext}"))
+        max_bytes = int(os.environ.get("MAX_UPLOAD_BYTES", 500 * 1024 * 1024))
+        if not (file.content_type or "").startswith("video/"):
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+        size = 0
+        with open(save_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise HTTPException(status_code=413, detail="File too large")
+                f.write(chunk)
+        supabase.table("jobs").insert({"job_id": job_id, "status": "pending", "url": file.filename}).execute()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {e}")
+
+    background_tasks.add_task(run_job, job_id, save_path, True)
+    return {"job_id": job_id}
+
+@app.get("/events/{job_id}")
+async def events(job_id: str):
+    async def gen():
+        try:
+            while True:
+                result = supabase.table("jobs").select("*").eq("job_id", job_id).single().execute()
+                if result.data:
+                    yield f"data: {result.data}\n\n"
+                    status = result.data.get("status")
+                    if status in ("completed", "failed"):
+                        break
+                await asyncio.sleep(2)
+        except Exception:
+            yield "event: error\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")

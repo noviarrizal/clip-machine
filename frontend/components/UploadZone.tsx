@@ -20,6 +20,8 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [inputUrl, setInputUrl] = useState("");
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -34,9 +36,14 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
   const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const url = e.dataTransfer.getData("text/uri-list");
-    if (url) {
-      await handleUrl(url);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      await handleFile(files[0]);
+    } else {
+      const url = e.dataTransfer.getData("text/uri-list");
+      if (url) {
+        await handleUrl(url);
+      }
     }
   }, []);
 
@@ -62,26 +69,63 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
     }
   };
 
+  const handleFile = async (file: File) => {
+    setIsLoading(true);
+    setError(null);
+    setUploadProgress(0);
+    await new Promise<void>((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_URL}/upload`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          setUploadProgress(pct);
+        }
+      };
+      xhr.onreadystatechange = () => {
+        if (xhr.readyState === 4) {
+          try {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              const newJob = JSON.parse(xhr.responseText);
+              setJob(newJob);
+              setUploadProgress(null);
+            } else {
+              const err = JSON.parse(xhr.responseText || '{}');
+              setError(err.detail || "Failed to start job");
+            }
+          } catch {
+            setError("Upload failed");
+          } finally {
+            setIsLoading(false);
+            resolve();
+          }
+        }
+      };
+      const form = new FormData();
+      form.append("license_key", LICENSE_KEY || "DEV-1234");
+      form.append("file", file);
+      xhr.send(form);
+    });
+  };
+
   useEffect(() => {
     if (job && (job.status === "processing" || job.status === "pending")) {
-      const interval = setInterval(async () => {
+      const es = new EventSource(`${API_URL}/events/${job.job_id}`);
+      es.onmessage = (ev) => {
         try {
-          const response = await fetch(`${API_URL}/status/${job.job_id}`);
-          const updatedJob = await response.json();
+          const updatedJob = JSON.parse(ev.data);
           setJob(updatedJob);
           if (updatedJob.status === "completed" || updatedJob.status === "failed") {
-            clearInterval(interval);
             setIsLoading(false);
+            es.close();
           }
-        } catch (err) {
-          console.error("Failed to fetch job status:", err);
-          setError("Failed to get job status.");
-          clearInterval(interval);
-          setIsLoading(false);
+        } catch {
         }
-      }, 3000); // Poll every 3 seconds
-
-      return () => clearInterval(interval);
+      };
+      es.onerror = () => {
+        es.close();
+      };
+      return () => es.close();
     }
   }, [job, setJob, setIsLoading]);
 
@@ -100,6 +144,18 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
         >
           Process
         </button>
+        <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={(e) => e.target.files && handleFile(e.target.files[0])} />
+        <button onClick={() => fileInputRef.current?.click()} className="px-4 py-2 rounded-xl bg-white/10 text-white hover:bg-white/20">
+          Upload File
+        </button>
+        {uploadProgress !== null && (
+          <div className="flex items-center gap-2 w-48">
+            <div className="h-2 flex-1 bg-white/10 rounded">
+              <div className="h-2 bg-purple-600 rounded" style={{ width: `${uploadProgress}%` }} />
+            </div>
+            <span className="text-xs text-zinc-400">{uploadProgress}%</span>
+          </div>
+        )}
       </div>
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}

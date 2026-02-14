@@ -114,27 +114,25 @@ def write_srt_file(segments, path, start_offset):
 # --- STAGE 3: THE MAIN ENGINE ---
 
 
-def download_and_process(url: str, job_id: str):
+def download_and_process(source: str, job_id: str, is_local: bool = False):
     os.makedirs("downloads", exist_ok=True)
     os.makedirs("output", exist_ok=True)
 
-    # 1. Download (We use a template so we KNOW the filename, but allow any extension)
-    # This forces yt-dlp to use the job_id as the name but keeps the extension it chooses
-    download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
-
-    print(f"--- Downloading: {url} ---")
-    subprocess.run(
-        ['yt-dlp', '-f', 'bestvideo[height<=720]+bestaudio/best', '-o', download_template, url],
-        check=True,
-    )
-
-    # FIND the actual file (since it could be .mp4, .mkv, or .webm)
-    downloaded_files = [f for f in os.listdir("downloads") if f.startswith(job_id)]
-    if not downloaded_files:
-        raise Exception("Download failed, no file found.")
-
-    raw_video_path = os.path.abspath(os.path.join("downloads", downloaded_files[0]))
-    print(f"✅ Downloaded to: {raw_video_path}")
+    if is_local:
+        raw_video_path = os.path.abspath(source)
+        if not os.path.exists(raw_video_path):
+            raise Exception("Uploaded file not found.")
+    else:
+        download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
+        subprocess.run(
+            ['yt-dlp', '-f', 'bestvideo[height<=720]+bestaudio/best', '-o', download_template, source],
+            check=True,
+        )
+        downloaded_files = [f for f in os.listdir("downloads") if f.startswith(job_id)]
+        if not downloaded_files:
+            raise Exception("Download failed, no file found.")
+        raw_video_path = os.path.abspath(os.path.join("downloads", downloaded_files[0]))
+        print(f"✅ Downloaded to: {raw_video_path}")
 
     # 2. Transcribe with Groq
     print("--- Transcribing with Groq --- ")
