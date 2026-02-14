@@ -1,14 +1,15 @@
-import uuid
 import os
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+import uuid
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from groq import Groq
 from pydantic import BaseModel
 
 # Internal Imports
 from processor import download_and_process
 from supabase_client import supabase
-from groq import Groq
 
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
@@ -17,7 +18,7 @@ app = FastAPI(title="ClipGen API")
 # 1. SETUP CORS (Connects to your Next.js Frontend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace with your frontend URL
+    allow_origins=["*"],  # In production, replace with your frontend URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -31,9 +32,11 @@ app.mount("/output", StaticFiles(directory="output"), name="output")
 # We use Supabase to persist job status, so restarts don't lose data.
 # The old in-memory 'jobs' dictionary is removed.
 
+
 class ProcessRequest(BaseModel):
     url: str
     license_key: str
+
 
 # 4. HELPER: LICENSE CHECK
 def is_valid_key(key: str) -> bool:
@@ -45,36 +48,41 @@ def is_valid_key(key: str) -> bool:
         print(f"Error validating key: {e}")
         return False
 
+
 # 5. BACKGROUND TASK WRAPPER
 def run_job(job_id: str, url: str):
     """The background task that downloads, processes, and updates the job status in Supabase."""
     try:
         # Update status to 'processing'
         supabase.table("jobs").update({"status": "processing"}).eq("job_id", job_id).execute()
-        
+
         # Run the core logic
         results = download_and_process(url, job_id)
-        
+
         # On success, update with 'completed' and the final clips
-        supabase.table("jobs").update({
-            "status": "completed",
-            "clips": results['clips'],
-            "transcription": results['transcription']
-        }).eq("job_id", job_id).execute()
+        supabase.table("jobs").update(
+            {
+                "status": "completed",
+                "clips": results['clips'],
+                "transcription": results['transcription'],
+            }
+        ).eq("job_id", job_id).execute()
 
     except Exception as e:
         print(f"Error processing job {job_id}: {e}")
         # On failure, update with 'failed' and the error message
-        supabase.table("jobs").update({
-            "status": "failed",
-            "error": str(e)
-        }).eq("job_id", job_id).execute()
+        supabase.table("jobs").update({"status": "failed", "error": str(e)}).eq(
+            "job_id", job_id
+        ).execute()
+
 
 # 6. API ROUTES
+
 
 @app.get("/")
 def health_check():
     return {"status": "online", "message": "ClipGen Backend Running"}
+
 
 @app.post("/process")
 async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks):
@@ -85,16 +93,15 @@ async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks
 
     # Insert a new job record into Supabase
     try:
-        supabase.table("jobs").insert({
-            "job_id": job_id,
-            "status": "pending",
-            "url": request.url
-        }).execute()
+        supabase.table("jobs").insert(
+            {"job_id": job_id, "status": "pending", "url": request.url}
+        ).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create job: {e}")
 
     background_tasks.add_task(run_job, job_id, request.url)
     return {"job_id": job_id}
+
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
@@ -106,13 +113,15 @@ async def get_status(job_id: str):
         return result.data
     except Exception as e:
         # Handle cases where .single() finds no record
-        if "PGRST116" in str(e): # PostgREST code for "exact one row not found"
-             raise HTTPException(status_code=404, detail="Job not found")
+        if "PGRST116" in str(e):  # PostgREST code for "exact one row not found"
+            raise HTTPException(status_code=404, detail="Job not found")
         raise HTTPException(status_code=500, detail=f"Error fetching job status: {e}")
+
 
 # 7. NEW: Social Content Generation
 class ContentRequest(BaseModel):
     job_id: str
+
 
 def generate_social_post(transcription: str) -> str:
     """Generates a social media post using Groq based on a transcription."""
@@ -124,12 +133,12 @@ def generate_social_post(transcription: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a viral social media content expert. Your goal is to create a short, punchy, and engaging social media post based on the provided transcription. Use emojis, hashtags, and a conversational tone. The output should be a single block of text, ready to be copy-pasted."
+                    "content": "You are a viral social media content expert. Your goal is to create a short, punchy, and engaging social media post based on the provided transcription. Use emojis, hashtags, and a conversational tone. The output should be a single block of text, ready to be copy-pasted.",
                 },
                 {
                     "role": "user",
-                    "content": f"Here is the transcription of a video clip: {transcription}"
-                }
+                    "content": f"Here is the transcription of a video clip: {transcription}",
+                },
             ],
             model="llama3-8b-8192",
         )
@@ -138,12 +147,19 @@ def generate_social_post(transcription: str) -> str:
         print(f"Error generating social post: {e}")
         return ""
 
+
 @app.post("/generate-content")
 async def generate_content(request: ContentRequest):
     """Generates a social media post from a job's transcription."""
     try:
         # 1. Fetch the job's transcription from Supabase
-        result = supabase.table("jobs").select("transcription").eq("job_id", request.job_id).single().execute()
+        result = (
+            supabase.table("jobs")
+            .select("transcription")
+            .eq("job_id", request.job_id)
+            .single()
+            .execute()
+        )
         if not result.data or not result.data.get("transcription"):
             raise HTTPException(status_code=404, detail="Transcription not found for this job.")
 

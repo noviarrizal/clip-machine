@@ -1,9 +1,9 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import { useState } from "react";
 import { Hero } from "@/components/Hero";
 import { UploadZone } from "@/components/UploadZone";
-import { ContentStudio } from '@/components/ContentStudio';
+import { ContentStudio } from "@/components/ContentStudio";
 
 // Define the structure of a Clip from the backend
 interface BackendClip {
@@ -15,7 +15,7 @@ interface BackendClip {
 // Define the structure for a Job
 export interface Job {
   job_id: string;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: "pending" | "processing" | "completed" | "failed";
   clips?: BackendClip[];
   transcription?: any[];
   error?: string;
@@ -37,8 +37,12 @@ export default function Home() {
             <span className="font-bold text-xl tracking-tight">ClipFlow</span>
           </div>
           <div className="hidden md:flex items-center gap-8 text-sm font-medium text-zinc-400">
-            <a href="#" className="hover:text-white transition-colors">Features</a>
-            <a href="#" className="hover:text-white transition-colors">Pricing</a>
+            <a href="#" className="hover:text-white transition-colors">
+              Features
+            </a>
+            <a href="#" className="hover:text-white transition-colors">
+              Pricing
+            </a>
             <button className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full text-white transition-all">
               Sign In
             </button>
@@ -47,23 +51,25 @@ export default function Home() {
       </nav>
 
       <Hero />
-      
+
       <div className="container mx-auto px-6 mt-12 mb-24">
-        {job && job.status === 'completed' ? (
-        <ContentStudio jobId={job.job_id} clips={job.clips ? job.clips.map(clip => ({ 
-            id: clip.id,
-            filename: clip.url.split('/').pop() || '',
-            url: clip.url,
-            score: 0,
-            transcription: job.transcription || [] 
-        })) : []} />
+        {job && job.status === "completed" ? (
+          <ContentStudio
+            jobId={job.job_id}
+            clips={
+              job.clips
+                ? job.clips.map((clip) => ({
+                    id: clip.id,
+                    filename: clip.url.split("/").pop() || "",
+                    url: clip.url,
+                    score: 0,
+                    transcription: job.transcription || [],
+                  }))
+                : []
+            }
+          />
         ) : (
-            <UploadZone 
-                setJob={setJob} 
-                setIsLoading={setIsLoading} 
-                isLoading={isLoading} 
-                job={job}
-            />
+          <UploadZone setJob={setJob} setIsLoading={setIsLoading} isLoading={isLoading} job={job} />
         )}
       </div>
 

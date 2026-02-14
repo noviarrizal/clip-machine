@@ -1,13 +1,13 @@
-'use client';
+"use client";
 
-import React, { useState, useCallback, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Loader2, AlertTriangle } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { Job } from '@/app/page'; // Import the Job interface
+import React, { useState, useCallback, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Upload, Loader2, AlertTriangle } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Job } from "@/app/page"; // Import the Job interface
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const LICENSE_KEY = process.env.NEXT_PUBLIC_LICENSE_KEY || '';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const LICENSE_KEY = process.env.NEXT_PUBLIC_LICENSE_KEY || "";
 
 interface UploadZoneProps {
   setJob: React.Dispatch<React.SetStateAction<Job | null>>;
@@ -19,7 +19,7 @@ interface UploadZoneProps {
 export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [inputUrl, setInputUrl] = useState('');
+  const [inputUrl, setInputUrl] = useState("");
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -34,7 +34,7 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
   const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const url = e.dataTransfer.getData('text/uri-list');
+    const url = e.dataTransfer.getData("text/uri-list");
     if (url) {
       await handleUrl(url);
     }
@@ -45,13 +45,13 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
     setError(null);
     try {
       const response = await fetch(`${API_URL}/process`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, license_key: LICENSE_KEY || 'DEV-1234' }),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, license_key: LICENSE_KEY || "DEV-1234" }),
       });
       if (!response.ok) {
         const err = await response.json();
-        throw new Error(err.detail || 'Failed to start job');
+        throw new Error(err.detail || "Failed to start job");
       }
       const newJob = await response.json();
       setJob(newJob);
@@ -63,19 +63,19 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
   };
 
   useEffect(() => {
-    if (job && (job.status === 'processing' || job.status === 'pending')) {
+    if (job && (job.status === "processing" || job.status === "pending")) {
       const interval = setInterval(async () => {
         try {
           const response = await fetch(`${API_URL}/status/${job.job_id}`);
           const updatedJob = await response.json();
           setJob(updatedJob);
-          if (updatedJob.status === 'completed' || updatedJob.status === 'failed') {
+          if (updatedJob.status === "completed" || updatedJob.status === "failed") {
             clearInterval(interval);
             setIsLoading(false);
           }
         } catch (err) {
-          console.error('Failed to fetch job status:', err);
-          setError('Failed to get job status.');
+          console.error("Failed to fetch job status:", err);
+          setError("Failed to get job status.");
           clearInterval(interval);
           setIsLoading(false);
         }
@@ -97,7 +97,9 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
         <button
           onClick={() => inputUrl && handleUrl(inputUrl)}
           className="px-4 py-2 rounded-xl bg-purple-600 text-white hover:bg-purple-700"
-        >Process</button>
+        >
+          Process
+        </button>
       </div>
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
@@ -105,8 +107,8 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
         transition={{ duration: 0.5, delay: 0.3 }}
         className={cn(
           "relative group cursor-pointer rounded-3xl border-2 border-dashed transition-all duration-300 p-12 text-center",
-          isDragging 
-            ? "border-purple-500 bg-purple-500/5" 
+          isDragging
+            ? "border-purple-500 bg-purple-500/5"
             : "border-white/10 bg-white/5 hover:border-white/20 hover:bg-white/[0.07]"
         )}
         onDragOver={onDragOver}
@@ -125,12 +127,12 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
               <div className="w-16 h-16 bg-purple-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-300">
                 <Upload className="w-8 h-8 text-purple-500" />
               </div>
-              <h3 className="text-xl font-semibold text-white">Drop a YouTube, TikTok, or X link</h3>
+              <h3 className="text-xl font-semibold text-white">Drop your video</h3>
               <p className="text-zinc-400">We'll download and process it for you.</p>
             </motion.div>
           )}
 
-          {(isLoading || (job && (job.status === 'pending' || job.status === 'processing'))) && (
+          {(isLoading || (job && (job.status === "pending" || job.status === "processing"))) && (
             <motion.div
               key="uploading"
               initial={{ opacity: 0 }}
@@ -144,7 +146,7 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
             </motion.div>
           )}
 
-          {job && job.status === 'failed' && (
+          {job && job.status === "failed" && (
             <motion.div
               key="success"
               initial={{ opacity: 0 }}
@@ -156,9 +158,11 @@ export function UploadZone({ setJob, setIsLoading, isLoading, job }: UploadZoneP
                 <AlertTriangle className="w-8 h-8 text-red-500" />
               </div>
               <h3 className="text-xl font-semibold text-white">Processing Failed</h3>
-              <p className="text-zinc-400 max-w-sm mx-auto">{job.error || 'An unknown error occurred.'}</p>
-              <button 
-                onClick={() => setJob(null)} 
+              <p className="text-zinc-400 max-w-sm mx-auto">
+                {job.error || "An unknown error occurred."}
+              </p>
+              <button
+                onClick={() => setJob(null)}
                 className="mt-4 px-6 py-2 bg-white text-black rounded-full font-medium hover:bg-zinc-200 transition-colors"
               >
                 Try Again

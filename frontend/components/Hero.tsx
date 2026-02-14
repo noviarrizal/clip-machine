@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import { motion } from 'framer-motion';
-import { Zap, Video, Share2 } from 'lucide-react';
+import { motion } from "framer-motion";
+import { Zap, Video, Share2 } from "lucide-react";
 
 export function Hero() {
   return (
@@ -27,12 +27,12 @@ export function Hero() {
             <span className="text-purple-500">Viral Content</span>
           </h1>
           <p className="text-lg md:text-xl text-zinc-400 max-w-2xl mx-auto mb-10">
-            Upload your video, transcribe it for free, and generate Twitter threads, 
-            IG captions, and short-form clips with auto-captions in seconds.
+            Upload your video, transcribe it for free, and generate Twitter threads, IG captions,
+            and short-form clips with auto-captions in seconds.
           </p>
         </motion.div>
 
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}

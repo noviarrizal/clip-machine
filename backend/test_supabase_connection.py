@@ -1,5 +1,7 @@
-from supabase_client import supabase, url, key
 import sys
+
+from supabase_client import key, supabase, url
+
 
 def test_connection():
     print(f"Testing connection to Supabase...")
@@ -12,15 +14,16 @@ def test_connection():
         # We can just check if the client is initialized, but a real request is better.
         # However, without knowing the table structure, a simple query might fail.
         # Auth check is usually safe.
-        
+
         user = supabase.auth.get_user()
         print("Supabase auth check executed (might return None if no user, but connection worked).")
-        
+
         print("✅ Connection verified successfully!")
         return True
     except Exception as e:
         print(f"❌ Connection failed: {e}")
         return False
+
 
 if __name__ == "__main__":
     success = test_connection()
