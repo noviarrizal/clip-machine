@@ -10,18 +10,17 @@ def test_connection():
     print(f"Key present: {'Yes' if key else 'No'}")
 
     try:
-        # Check health/validity by making a simple request
-        # We can just check if the client is initialized, but a real request is better.
-        # However, without knowing the table structure, a simple query might fail.
-        # Auth check is usually safe.
+        # Check if we can select from keys and jobs tables
+        keys_check = supabase.table("keys").select("key").limit(1).execute()
+        print(f"Supabase 'keys' table check: {len(keys_check.data) >= 0} (table exists)")
 
-        user = supabase.auth.get_user()
-        print("Supabase auth check executed (might return None if no user, but connection worked).")
+        jobs_check = supabase.table("jobs").select("job_id").limit(1).execute()
+        print(f"Supabase 'jobs' table check: {len(jobs_check.data) >= 0} (table exists)")
 
-        print("✅ Connection verified successfully!")
+        print("✅ Connection and tables verified successfully!")
         return True
     except Exception as e:
-        print(f"❌ Connection failed: {e}")
+        print(f"❌ Connection or table check failed. Did you run the SQL script in Supabase? Error: {e}")
         return False
 
 
