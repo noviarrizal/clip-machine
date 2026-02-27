@@ -1,252 +1,329 @@
+"""
+processor.py
+
+Core video processing engine for ClipGen.
+
+Pipeline:
+  1. Download video (yt-dlp) or accept a local file.
+  2. Transcribe audio (Gemini Flash — multimodal, no Whisper needed).
+  3. Discover the best viral moments (Gemini Pro — LLM analysis).
+  4. Render clips in parallel with FFmpeg using smart face-detection cropping.
+"""
+
+import asyncio
 import datetime
+import json
 import os
 import subprocess
 
 import cv2
-import whisper
 from dotenv import load_dotenv
-from groq import Groq
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-from tqdm import tqdm
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-# Ensure FFmpeg is in the system's PATH or specify the path directly
-# You can add the following lines if ffmpeg is not in your PATH
-# ffmpeg_path = r"C:\path\to\ffmpeg\bin"
-# os.environ["PATH"] += os.pathsep + ffmpeg_path
+_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# --- CONFIGURATION ---
-VIRAL_KEYWORDS = [
-    "amazing",
-    "best",
-    "hack",
-    "advice",
-    "money",
-    "growth",
-    "mistake",
-    "never",
-    "always",
-    "story",
-    "the truth",
-    "failed",
-]
-CLIP_DURATION = 30  # seconds
-MAX_CLIPS = 5
+MODEL_PRO = "gemini-2.0-pro-exp"      # Best reasoning — viral moment analysis
+MODEL_FLASH = "gemini-2.0-flash-lite"  # Fastest — transcription
 
-# --- STAGE 1: ANALYSIS HELPERS ---
+CLIP_DURATION = 30   # seconds per clip
+MAX_CLIPS = 5        # maximum number of clips to extract
+MIN_GAP = 60         # minimum seconds between clip start times
+
+# ---------------------------------------------------------------------------
+# Stage 1 — Transcription
+# ---------------------------------------------------------------------------
 
 
-def get_viral_score(text: str) -> int:
-    """Simple scoring based on keyword density."""
-    score = 0
-    words = text.lower().split()
-    for keyword in VIRAL_KEYWORDS:
-        if keyword in words:
-            score += 10
-    if len(text) < 60:  # Bonus for short, punchy sentences
-        score += 2
-    return score
+async def transcribe_video(video_file) -> list[dict]:
+    """
+    Asks Gemini Flash to transcribe a video and return structured segments.
+
+    Returns a list of dicts with keys: start (float), end (float), text (str).
+    Falls back to a single dummy segment if parsing fails.
+    """
+    prompt = (
+        "Provide the transcription of this video as a JSON list of segments. "
+        "Each segment must have these exact keys: 'start' (seconds, float), "
+        "'end' (seconds, float), and 'text' (string). "
+        "Output ONLY the raw JSON array, no markdown."
+    )
+
+    response = await _client.aio.models.generate_content(
+        model=MODEL_FLASH,
+        contents=[video_file, prompt],
+    )
+
+    try:
+        clean_json = response.text.strip().lstrip("```json").rstrip("```").strip()
+        return json.loads(clean_json)
+    except (json.JSONDecodeError, ValueError):
+        # Graceful fallback — return the raw text as one segment
+        return [{"start": 0.0, "end": CLIP_DURATION, "text": response.text[:300]}]
 
 
-def find_best_moments(segments, count=MAX_CLIPS):
-    """Slices transcript into high-value windows."""
-    scored_moments = []
+# ---------------------------------------------------------------------------
+# Stage 2 — Viral Moment Discovery
+# ---------------------------------------------------------------------------
 
-    for i in range(len(segments)):
-        start_time = segments[i]['start']
-        end_time = start_time + CLIP_DURATION
 
-        # Aggregate text and score for this 30s window
-        window_text = ""
-        for j in range(i, len(segments)):
-            if segments[j]['start'] > end_time:
+async def discover_viral_moments(transcription_text: str, segments: list[dict]) -> list[dict]:
+    """
+    Uses Gemini Pro to identify the most engaging 30-second segments.
+
+    Returns a list of dicts with keys: start (float), reason (str).
+    Falls back to the first N segments if the LLM response cannot be parsed.
+    """
+    prompt = f"""
+You are a viral content expert. Analyze the following video transcription and
+identify the top {MAX_CLIPS} most engaging, high-impact, or 'viral-worthy'
+{CLIP_DURATION}-second segments.
+
+For each segment output:
+  - "start": start timestamp in seconds (float)
+  - "reason": one sentence explaining why this segment is viral
+
+Rules:
+  - Segments must not overlap (at least {MIN_GAP}s between start times).
+  - Output ONLY a raw JSON array, no markdown or extra text.
+
+Transcription:
+{transcription_text}
+
+Example output:
+[{{"start": 12.5, "reason": "Emotional hook about overcoming failure."}}]
+"""
+
+    try:
+        response = await _client.aio.models.generate_content(
+            model=MODEL_PRO,
+            contents=prompt,
+        )
+        clean_json = response.text.strip().lstrip("```json").rstrip("```").strip()
+        moments = json.loads(clean_json)
+
+        # Deduplicate — ensure at least MIN_GAP seconds between clips
+        unique: list[dict] = []
+        for m in moments:
+            start = float(m["start"])
+            if not any(abs(start - u["start"]) < MIN_GAP for u in unique):
+                unique.append({"start": start, "reason": m.get("reason", "")})
+            if len(unique) >= MAX_CLIPS:
                 break
-            window_text += " " + segments[j]['text']
 
-        scored_moments.append({"start": start_time, "score": get_viral_score(window_text)})
+        return unique
 
-    # Sort by highest score first
-    scored_moments.sort(key=lambda x: x['score'], reverse=True)
-
-    # Filter to avoid overlapping clips (ensure at least 1 min gap)
-    unique_moments = []
-    for m in scored_moments:
-        if not any(abs(m['start'] - u['start']) < 60 for u in unique_moments):
-            unique_moments.append(m)
-        if len(unique_moments) >= count:
-            break
-
-    return unique_moments
+    except (json.JSONDecodeError, ValueError, KeyError) as exc:
+        print(f"[processor] Viral moment discovery failed ({exc}), using fallback.")
+        return [{"start": float(s["start"]), "reason": "Top segment"} for s in segments[:MAX_CLIPS]]
 
 
-# --- STAGE 2: SUBTITLE GENERATION ---
+# ---------------------------------------------------------------------------
+# Stage 3 — Subtitle Generation
+# ---------------------------------------------------------------------------
 
 
-def format_srt_time(seconds: float) -> str:
-    """Converts seconds to HH:MM:SS,ms format for SRT files."""
+def _format_srt_time(seconds: float) -> str:
+    """Converts a float number of seconds to SRT timestamp format (HH:MM:SS,ms)."""
     td = datetime.timedelta(seconds=seconds)
     total_sec = int(td.total_seconds())
-    milli = int(td.microseconds / 1000)
-    return f"{total_sec//3600:02d}:{(total_sec%3600)//60:02d}:{total_sec%60:02d},{milli:03d}"
+    millis = int(td.microseconds / 1000)
+    hours, remainder = divmod(total_sec, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def write_srt_file(segments, path, start_offset):
-    """Writes a standard SRT subtitle file for a specific clip."""
-    with open(path, 'w', encoding='utf-8') as f:
-        for idx, seg in enumerate(segments):
-            # Only include text that falls within the 30s window
-            if seg['start'] < start_offset:
+def _write_srt_file(segments: list[dict], path: str, clip_start: float) -> None:
+    """
+    Writes an SRT subtitle file for a clip that starts at `clip_start` seconds.
+    Timestamps are re-based to be relative to the clip start.
+    """
+    clip_end = clip_start + CLIP_DURATION
+    entry_index = 1
+
+    with open(path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            if seg["start"] < clip_start:
                 continue
-            if seg['start'] > start_offset + CLIP_DURATION:
+            if seg["start"] > clip_end:
                 break
 
-            # Recalculate time relative to the clip start
-            start = max(0, seg['start'] - start_offset)
-            end = min(CLIP_DURATION, seg['end'] - start_offset)
+            start = max(0.0, seg["start"] - clip_start)
+            end = min(float(CLIP_DURATION), seg["end"] - clip_start)
 
-            f.write(f"{idx + 1}\n")
-            f.write(f"{format_srt_time(start)} --> {format_srt_time(end)}\n")
+            f.write(f"{entry_index}\n")
+            f.write(f"{_format_srt_time(start)} --> {_format_srt_time(end)}\n")
             f.write(f"{seg['text'].strip().upper()}\n\n")
+            entry_index += 1
 
 
-# --- STAGE 3: THE MAIN ENGINE ---
+# ---------------------------------------------------------------------------
+# Stage 4 — Smart Crop (Face Detection)
+# ---------------------------------------------------------------------------
 
 
-def download_and_process(source: str, job_id: str, is_local: bool = False):
-    os.makedirs("downloads", exist_ok=True)
-    os.makedirs("output", exist_ok=True)
+def _get_face_center(video_path: str, start_time: float) -> float:
+    """
+    Detects the largest face in the frame at `start_time + 1s` and returns
+    its horizontal center as a value in [0, 1] (0 = left edge, 1 = right edge).
 
-    if is_local:
-        raw_video_path = os.path.abspath(source)
-        if not os.path.exists(raw_video_path):
-            raise Exception("Uploaded file not found.")
-    else:
-        download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
-        subprocess.run(
-            ['yt-dlp', '-f', 'bestvideo[height<=720]+bestaudio/best', '-o', download_template, source],
-            check=True,
-        )
-        downloaded_files = [f for f in os.listdir("downloads") if f.startswith(job_id)]
-        if not downloaded_files:
-            raise Exception("Download failed, no file found.")
-        raw_video_path = os.path.abspath(os.path.join("downloads", downloaded_files[0]))
-        print(f"✅ Downloaded to: {raw_video_path}")
-
-    # 2. Transcribe with Groq
-    print("--- Transcribing with Groq --- ")
-    with open(raw_video_path, "rb") as file:
-        transcription = client.audio.transcriptions.create(
-            file=(raw_video_path, file.read()),
-            model="whisper-large-v3",
-            prompt="",  # Optional: Add a prompt to guide the model
-            response_format="verbose_json",  # Get segments and timestamps
-            language="en",  # Optional: Specify language
-        )
-    result = {'text': transcription.text, 'segments': transcription.segments}
-
-    # 3. Analyze for best moments
-    moments = find_best_moments(result['segments'])
-    print(f"✅ Transcription Complete. Found {len(moments)} viral moments.")
-
-    pbar = tqdm(total=len(moments), desc="🎬 Generating Clips", unit="clip")
-
-    final_clips = []
-    for i, moment in enumerate(moments):
-        clip_name = f"{job_id}_clip_{i}.mp4"
-        srt_path = os.path.abspath(f"output/{job_id}_{i}.srt")
-        output_path = os.path.abspath(f"output/{clip_name}")
-
-        write_srt_file(result['segments'], srt_path, moment['start'])
-        clean_srt = srt_path.replace("\\", "/").replace(":", "\\:")
-
-        # Viral Subtitle Filter - High Contrast & Centered
-        subtitle_filter = (
-            f"subtitles='{clean_srt}':force_style='"
-            f"Fontname=Arial,FontSize=15,Bold=1,"
-            f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-            f"BorderStyle=1,Outline=2,Alignment=10,MarginV=20'"
-        )
-
-        cmd = [
-            'ffmpeg',
-            '-y',
-            '-loglevel',
-            'error',  # 'error' hides the messy logs
-            '-ss',
-            str(moment['start']),
-            '-t',
-            str(CLIP_DURATION),
-            '-i',
-            raw_video_path,
-            '-vf',
-            f"crop=ih*(9/16):ih,scale=1080:1920,{subtitle_filter}",
-            '-c:v',
-            'libx264',
-            '-preset',
-            'ultrafast',
-            '-crf',
-            '18',
-            '-c:a',
-            'aac',
-            output_path,
-        ]
-
-        subprocess.run(cmd, check=True)
-
-        final_clips.append(
-            {
-                "id": i,
-                "url": f"http://localhost:8000/output/{clip_name}",
-                "timestamp": f"{int(moment['start']//60)}:{int(moment['start']%60):02d}",
-            }
-        )
-
-        pbar.update(1)  # Move the progress bar forward
-
-    pbar.close()
-    print("✨ All clips rendered successfully!")
-    return {"clips": final_clips, "transcription": result['segments']}
-
-
-def get_face_center(video_path, start_time):
-    """Finds the horizontal center of the most prominent face in a video frame."""
+    Returns 0.5 (center) if no face is detected or the video cannot be read.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print("Error: Could not open video.")
-        return 0.5  # Default to center
+        return 0.5
 
-    # Jump to 1 second into the clip to find the face
     cap.set(cv2.CAP_PROP_POS_MSEC, (start_time + 1) * 1000)
     success, frame = cap.read()
     cap.release()
 
     if not success:
-        print("Error: Could not read frame from video.")
-        return 0.5  # Default to center
+        return 0.5
 
-    # Load the pre-trained Haar Cascade model for face detection
     face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
     )
 
-    # Convert the frame to grayscale for the detector
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if len(faces) == 0:
+        return 0.5
 
-    # Detect faces
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    # Use the largest face as the main subject
+    x, _, w, _ = max(faces, key=lambda r: r[2] * r[3])
+    return (x + w / 2) / frame.shape[1]
 
-    if len(faces) > 0:
-        # Assume the largest face is the main subject
-        main_face = max(faces, key=lambda rect: rect[2] * rect[3])
-        x, y, w, h = main_face
 
-        # Calculate the center of the face
-        face_center_x = x + w / 2
+# ---------------------------------------------------------------------------
+# Stage 5 — Clip Rendering
+# ---------------------------------------------------------------------------
 
-        # Return the center as a percentage of the total frame width
-        return face_center_x / frame.shape[1]
 
-    # If no face is found, default to the center of the frame
-    return 0.5
+async def _render_clip(
+    index: int,
+    moment: dict,
+    video_path: str,
+    job_id: str,
+    segments: list[dict],
+) -> dict:
+    """
+    Renders a single 9:16 clip using FFmpeg with:
+      - Smart horizontal crop based on face detection.
+      - Burned-in subtitles from the SRT file.
+
+    Returns a clip metadata dict.
+    """
+    clip_name = f"{job_id}_clip_{index}.mp4"
+    srt_path = os.path.abspath(f"output/{job_id}_{index}.srt")
+    output_path = os.path.abspath(f"output/{clip_name}")
+
+    _write_srt_file(segments, srt_path, moment["start"])
+
+    # Face-aware horizontal crop:
+    # The 9:16 crop window is ih*(9/16) wide. We position it so the
+    # detected face sits at the centre of the window.
+    face_center = _get_face_center(video_path, moment["start"])
+    crop_x = f"min(max(0,iw*{face_center}-ih*(9/32)),iw-ih*(9/16))"
+
+    # Escape the SRT path for FFmpeg's subtitles filter
+    clean_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+    subtitle_filter = (
+        f"subtitles='{clean_srt}':force_style='"
+        "Fontname=Arial,FontSize=15,Bold=1,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+        "BorderStyle=1,Outline=2,Alignment=10,MarginV=20'"
+    )
+
+    ffmpeg_cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", str(moment["start"]),
+        "-t", str(CLIP_DURATION),
+        "-i", video_path,
+        "-vf", f"crop=ih*(9/16):ih:{crop_x}:0,scale=1080:1920,{subtitle_filter}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:a", "aac",
+        output_path,
+    ]
+
+    process = await asyncio.create_subprocess_exec(*ffmpeg_cmd)
+    await process.wait()
+
+    return {
+        "id": index,
+        "url": f"http://localhost:8000/output/{clip_name}",
+        "timestamp": f"{int(moment['start'] // 60)}:{int(moment['start'] % 60):02d}",
+        "reason": moment.get("reason", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+
+async def download_and_process(
+    source: str, job_id: str, is_local: bool = False
+) -> dict:
+    """
+    Full pipeline: download → transcribe → analyse → render clips.
+
+    Args:
+        source:   A URL (YouTube, etc.) or a local file path when is_local=True.
+        job_id:   Unique identifier used to name output files.
+        is_local: Set to True when `source` is already a local file path.
+
+    Returns:
+        A dict with keys:
+          - "clips": list of clip metadata dicts.
+          - "transcription": list of segment dicts from Gemini.
+    """
+    os.makedirs("downloads", exist_ok=True)
+    os.makedirs("output", exist_ok=True)
+
+    # -- Step 1: Obtain the raw video file --
+    if is_local:
+        raw_video_path = os.path.abspath(source)
+    else:
+        download_template = os.path.join("downloads", f"{job_id}.%(ext)s")
+        subprocess.run(
+            ["yt-dlp", "-f", "bestvideo[height<=720]+bestaudio/best", "-o", download_template, source],
+            check=True,
+        )
+        downloaded = [f for f in os.listdir("downloads") if f.startswith(job_id)]
+        if not downloaded:
+            raise FileNotFoundError(f"yt-dlp did not produce an output file for job {job_id}.")
+        raw_video_path = os.path.abspath(os.path.join("downloads", downloaded[0]))
+        print(f"[processor] Downloaded → {raw_video_path}")
+
+    # -- Step 2: Upload to Gemini and transcribe --
+    print("[processor] Uploading video to Gemini Files API…")
+    video_file = _client.files.upload(file=raw_video_path)
+
+    while video_file.state.name == "PROCESSING":
+        await asyncio.sleep(2)
+        video_file = _client.files.get(name=video_file.name)
+
+    print("[processor] Transcribing with Gemini Flash…")
+    segments = await transcribe_video(video_file)
+
+    # -- Step 3: Discover the best viral moments --
+    print("[processor] Analysing viral moments with Gemini Pro…")
+    transcription_text = " ".join(s["text"] for s in segments)
+    moments = await discover_viral_moments(transcription_text, segments)
+    print(f"[processor] Found {len(moments)} viral moment(s).")
+
+    # -- Step 4: Render all clips in parallel --
+    print("[processor] Rendering clips in parallel…")
+    tasks = [_render_clip(i, m, raw_video_path, job_id, segments) for i, m in enumerate(moments)]
+    clips = list(await asyncio.gather(*tasks))
+
+    print("[processor] ✨ All clips rendered successfully.")
+    return {"clips": clips, "transcription": segments}

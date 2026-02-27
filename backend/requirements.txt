@@ -1,9 +1,10 @@
 fastapi
 uvicorn
 yt-dlp
-openai-whisper
 python-multipart
 supabase
 python-dotenv
 black
 isort
+google-genai
+opencv-python-headless
