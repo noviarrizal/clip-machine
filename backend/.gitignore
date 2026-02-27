@@ -7,6 +7,3 @@ __pycache__/
 node_modules/
 .next/
 
-# Env
-.env
-.env.local
