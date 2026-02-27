@@ -35,7 +35,7 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
   const [activeTab, setActiveTab] = useState<"twitter" | "instagram" | "linkedin" | "captions">(
     "twitter"
   );
-  const [socialContent, setSocialContent] = useState<any>(null);
+  const [socialContent, setSocialContent] = useState<{ twitter?: string; instagram?: string; linkedin?: string } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExporting] = useState(false);
   const [crop, setCrop] = useState({ x: 150, y: 0, width: 180, height: 320 });
@@ -44,6 +44,8 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
     ? selectedClip.transcription.map((s) => s.text).join(" ")
     : "";
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const [isRerendering, setIsRerendering] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     if (selectedClip) {
@@ -66,7 +68,8 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
         throw new Error("Failed to generate content");
       }
       const data = await response.json();
-      setSocialContent(data.social_post);
+      const content = data.content || { twitter: data.social_post || "", instagram: data.social_post || "", linkedin: data.social_post || "" };
+      setSocialContent(content);
     } catch (error) {
       console.error(error);
     } finally {
@@ -86,6 +89,33 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
     document.body.removeChild(link);
   };
 
+  const handleReRender = async () => {
+    if (!selectedClip || !videoRef.current) return;
+    const idx = clips.findIndex((c) => c.filename === selectedClip.filename);
+    if (idx < 0) return;
+    const container = videoRef.current.getBoundingClientRect();
+    const nx = crop.x / container.width;
+    const nw = crop.width / container.width;
+    setIsRerendering(true);
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('AUTH_TOKEN') : null;
+      const res = await fetch(`${API_URL}/render-clip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ job_id: jobId, clip_index: idx, crop: { x: nx, width: nw } }),
+      });
+      if (!res.ok) throw new Error('Re-render failed');
+      await res.json();
+      setVideoUrl(`${selectedClip.url}?t=${Date.now()}`);
+      setToast('Clip re-rendered');
+      setTimeout(()=> setToast(null), 2000);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsRerendering(false);
+    }
+  };
+
   return (
     <div className="max-w-6xl mx-auto px-6 pb-20">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -99,7 +129,12 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
             <div className="flex gap-2">
               <button className="p-2 bg-white/5 rounded-lg hover:bg-white/10 transition-colors">
                 <Layout className="w-4 h-4" />
-              </button>
+      </button>
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-white/10 border border-white/20 text-white text-sm">
+          {toast}
+        </div>
+      )}
               <button className="p-2 bg-white/5 rounded-lg hover:bg-white/10 transition-colors">
                 <Type className="w-4 h-4" />
               </button>
@@ -220,10 +255,24 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
                 >
                   <textarea
                     className="w-full h-64 bg-transparent whitespace-pre-wrap text-zinc-300 text-sm leading-relaxed outline-none resize-none"
-                    defaultValue={socialContent}
+                    defaultValue={
+                      activeTab === "twitter"
+                        ? socialContent.twitter || ""
+                        : activeTab === "instagram"
+                        ? socialContent.instagram || ""
+                        : socialContent.linkedin || ""
+                    }
                   />
                   <button
-                    onClick={() => navigator.clipboard.writeText(socialContent)}
+                    onClick={() => {
+                      const text =
+                        activeTab === "twitter"
+                          ? socialContent.twitter || ""
+                          : activeTab === "instagram"
+                          ? socialContent.instagram || ""
+                          : socialContent.linkedin || "";
+                      navigator.clipboard.writeText(text);
+                    }}
                     className="w-full py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2"
                   >
                     Copy to Clipboard
@@ -258,6 +307,18 @@ export function ContentStudio({ clips, jobId }: ContentStudioProps) {
                 <span>Export & Download</span>
               </>
             )}
+          </button>
+          <button
+            onClick={handleReRender}
+            disabled={isRerendering || !selectedClip}
+            className={cn(
+              "w-full mt-3 py-3 rounded-2xl font-bold transition-all flex items-center justify-center gap-3",
+              isRerendering || !selectedClip
+                ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
+                : "bg-white/5 hover:bg-white/10 border border-white/10 text-white"
+            )}
+          >
+            {isRerendering ? 'Re-rendering...' : 'Apply Crop & Re-Render'}
           </button>
         </div>
       </div>

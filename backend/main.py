@@ -66,7 +66,7 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 500 * 1024 * 1024))  #
 
 class ProcessRequest(BaseModel):
     url: str
-    license_key: str
+    license_key: str | None = None
 
 
 class ContentRequest(BaseModel):
@@ -263,7 +263,7 @@ async def generate_content(request: ContentRequest):
     try:
         result = (
             supabase.table("jobs")
-            .select("transcription")
+            .select("transcription, social_content")
             .eq("job_id", request.job_id)
             .single()
             .execute()
