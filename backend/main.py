@@ -5,25 +5,31 @@ FastAPI application for ClipGen.
 
 Routes:
   GET  /               — Health check.
-  POST /process        — Submit a video URL for processing.
-  POST /upload         — Upload a local video file for processing.
-  GET  /status/{id}    — Poll job status.
+  POST /auth/signup    — Register a new user.
+  POST /auth/signin    — Authenticate and receive a JWT token.
+  POST /process        — Submit a video URL for processing (auth required).
+  POST /upload         — Upload a local video file for processing (auth required).
+  GET  /status/{id}    — Poll job status (auth required).
   GET  /events/{id}    — Server-sent events stream for real-time job updates.
-  POST /generate-content — Generate a social media post from a completed job.
+  POST /generate-content — Generate a social media post from a completed job (auth required).
   GET  /output/{file}  — Serve generated video clips.
 """
 
 import asyncio
 import os
 import uuid
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Security, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from google import genai
-from pydantic import BaseModel
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from pydantic import BaseModel, EmailStr
 
 from processor import download_and_process
 from supabase_client import supabase
@@ -62,6 +68,62 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 500 * 1024 * 1024))  #
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Auth configuration
+# ---------------------------------------------------------------------------
+
+JWT_SECRET = os.environ.get("JWT_SECRET", "changeme-use-a-strong-secret-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+bearer_scheme = HTTPBearer(auto_error=False)
+
+# ---------------------------------------------------------------------------
+# Auth helpers
+# ---------------------------------------------------------------------------
+
+
+def _hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    return pwd_context.verify(plain, hashed)
+
+
+def _create_token(user_id: str, email: str) -> str:
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "exp": datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+) -> dict:
+    """FastAPI dependency — validates the JWT token and returns the user payload."""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token.")
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
 
 
 class ProcessRequest(BaseModel):
@@ -157,12 +219,52 @@ def health_check():
     return {"status": "online", "message": "ClipGen Backend Running"}
 
 
-@app.post("/process")
-async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks):
-    """Submits a video URL for background processing."""
-    if not _is_valid_key(request.license_key):
-        raise HTTPException(status_code=401, detail="Invalid license key.")
+@app.post("/auth/signup")
+def signup(body: AuthRequest):
+    """Creates a new user account and returns a JWT token."""
+    email = body.email.strip().lower()
+    password = body.password
 
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters.")
+
+    # Check if user already exists
+    existing = supabase.table("users").select("id").eq("email", email).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    hashed = _hash_password(password)
+    result = supabase.table("users").insert({"email": email, "hashed_password": hashed}).execute()
+    user = result.data[0]
+
+    token = _create_token(user["id"], user["email"])
+    return {"access_token": token, "token_type": "bearer", "email": user["email"]}
+
+
+@app.post("/auth/signin")
+def signin(body: AuthRequest):
+    """Authenticates an existing user and returns a JWT token."""
+    email = body.email.strip().lower()
+
+    result = supabase.table("users").select("id, email, hashed_password").eq("email", email).execute()
+    if not result.data:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    user = result.data[0]
+    if not _verify_password(body.password, user["hashed_password"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    token = _create_token(user["id"], user["email"])
+    return {"access_token": token, "token_type": "bearer", "email": user["email"]}
+
+
+@app.post("/process")
+async def create_task(
+    request: ProcessRequest,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """Submits a video URL for background processing. Requires authentication."""
     job_id = str(uuid.uuid4())
 
     try:
@@ -179,12 +281,10 @@ async def create_task(request: ProcessRequest, background_tasks: BackgroundTasks
 @app.post("/upload")
 async def upload_file(
     background_tasks: BackgroundTasks,
-    license_key: str = Form(...),
     file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
 ):
-    """Accepts a local video file upload and queues it for processing."""
-    if not _is_valid_key(license_key):
-        raise HTTPException(status_code=401, detail="Invalid license key.")
+    """Accepts a local video file upload and queues it for processing. Requires authentication."""
 
     if not (file.content_type or "").startswith("video/"):
         raise HTTPException(status_code=400, detail="Unsupported file type. Please upload a video.")
@@ -217,7 +317,7 @@ async def upload_file(
 
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str):
+async def get_status(job_id: str, current_user: dict = Depends(get_current_user)):
     """Returns the current status and results (if available) for a job."""
     try:
         result = (
@@ -258,7 +358,7 @@ async def job_events(job_id: str):
 
 
 @app.post("/generate-content")
-async def generate_content(request: ContentRequest):
+async def generate_content(request: ContentRequest, current_user: dict = Depends(get_current_user)):
     """Generates a social media post from a completed job's transcription."""
     try:
         result = (

@@ -9,3 +9,5 @@ isort
 google-genai
 opencv-python-headless
 psycopg2-binary
+passlib[bcrypt]
+python-jose[cryptography]

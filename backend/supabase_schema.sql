@@ -17,13 +17,23 @@ CREATE TABLE IF NOT EXISTS public.jobs (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
+-- Create users table for authentication
+CREATE TABLE IF NOT EXISTS public.users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email TEXT UNIQUE NOT NULL,
+    hashed_password TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
 -- Set up Row Level Security (RLS)
 -- For a simple backend integration using the service_role key, 
 -- or if the API key used has full access, RLS can be optional.
 -- Here we enable it but allow all operations for authenticated users (or anon if needed).
 ALTER TABLE public.keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 
 -- Creating basic policies to allow everything for now (you can restrict this in production)
 CREATE POLICY "Allow all operations for anon on keys" ON public.keys FOR ALL USING (true);
 CREATE POLICY "Allow all operations for anon on jobs" ON public.jobs FOR ALL USING (true);
+CREATE POLICY "Allow all operations for anon on users" ON public.users FOR ALL USING (true);
